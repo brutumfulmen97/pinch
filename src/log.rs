@@ -1,3 +1,4 @@
+use std::io::ErrorKind::AlreadyExists;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::{fs, io, path::Path};
@@ -21,12 +22,32 @@ pub(crate) enum LogError {
 
 impl Log {
     pub(crate) fn new(file_name: impl AsRef<Path>) -> Result<Self, LogError> {
-        let file = fs::OpenOptions::new()
+        let file = match fs::OpenOptions::new()
             .read(true)
             .append(true)
-            .create(true)
+            .create_new(true)
             .mode(0o644)
-            .open(file_name)?;
+            .open(&file_name)
+        {
+            Ok(file) => {
+                file.sync_all()?;
+                let parent_directory = file_name
+                    .as_ref()
+                    .parent()
+                    .filter(|path| !path.as_os_str().is_empty())
+                    .unwrap_or(Path::new("."));
+
+                fs::File::open(parent_directory)?.sync_all()?;
+                file
+            }
+            Err(err) if err.kind() == AlreadyExists => fs::OpenOptions::new()
+                .read(true)
+                .append(true)
+                .open(file_name)?,
+            Err(err) => {
+                return Err(err.into());
+            }
+        };
         Ok(Self { file })
     }
 
