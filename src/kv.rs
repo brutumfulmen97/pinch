@@ -6,7 +6,7 @@ use crate::{kv_entry, log};
 #[derive(Debug)]
 pub(crate) struct Kv {
     log: log::Log,
-    mem: HashMap<Bytes, Bytes>,
+    entries: HashMap<Bytes, Bytes>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -17,21 +17,21 @@ pub(crate) enum KvError {
 
 impl Kv {
     pub(crate) fn new(file_name: impl AsRef<Path>) -> Result<Self, KvError> {
-        let mut kv = Self {
+        let mut key_value_store = Self {
             log: log::Log::new(file_name)?,
-            mem: HashMap::new(),
+            entries: HashMap::new(),
         };
-        kv.replay()?;
-        Ok(kv)
+        key_value_store.replay()?;
+        Ok(key_value_store)
     }
 
     fn replay(&mut self) -> Result<(), KvError> {
         while let Some(entry) = self.log.read()? {
             let (key, value, deleted) = entry.into_parts();
             if deleted {
-                self.mem.remove(&key);
+                self.entries.remove(&key);
             } else {
-                self.mem.insert(key, value);
+                self.entries.insert(key, value);
             }
         }
 
@@ -39,21 +39,21 @@ impl Kv {
     }
 
     pub(crate) fn get(&self, key: &Bytes) -> Option<Bytes> {
-        self.mem.get(key).cloned()
+        self.entries.get(key).cloned()
     }
 
-    pub(crate) fn set(&mut self, key: Bytes, val: Bytes) -> Result<bool, KvError> {
+    pub(crate) fn set(&mut self, key: Bytes, value: Bytes) -> Result<bool, KvError> {
         self.log
-            .write(kv_entry::Entry::new(key.clone(), val.clone(), false))?;
+            .write(&kv_entry::Entry::new(key.clone(), value.clone(), false))?;
 
-        Ok(self.mem.insert(key, val).is_some())
+        Ok(self.entries.insert(key, value).is_some())
     }
 
-    pub(crate) fn del(&mut self, key: Bytes) -> Result<bool, KvError> {
-        if self.mem.contains_key(&key) {
+    pub(crate) fn delete(&mut self, key: &Bytes) -> Result<bool, KvError> {
+        if self.entries.contains_key(key) {
             self.log
-                .write(kv_entry::Entry::new(key.clone(), Bytes::new(), true))?;
-            self.mem.remove(&key);
+                .write(&kv_entry::Entry::new(key.clone(), Bytes::new(), true))?;
+            self.entries.remove(key);
             Ok(true)
         } else {
             Ok(false)
@@ -70,17 +70,23 @@ mod tests {
     #[test]
     fn kv_sets_updates_and_deletes_values() -> anyhow::Result<()> {
         let temp_dir = tempdir()?;
-        let mut kv = Kv::new(temp_dir.path().join("wal"))?;
+        let mut key_value_store = Kv::new(temp_dir.path().join("wal"))?;
         let key = Bytes::from_static(b"key");
 
-        assert_eq!(kv.get(&key), None);
-        assert!(!kv.set(key.clone(), Bytes::from_static(b"first"))?);
-        assert_eq!(kv.get(&key), Some(Bytes::from_static(b"first")));
-        assert!(kv.set(key.clone(), Bytes::from_static(b"second"))?);
-        assert_eq!(kv.get(&key), Some(Bytes::from_static(b"second")));
-        assert!(kv.del(key.clone())?);
-        assert_eq!(kv.get(&key), None);
-        assert!(!kv.del(key)?);
+        assert_eq!(key_value_store.get(&key), None);
+        assert!(!key_value_store.set(key.clone(), Bytes::from_static(b"first"))?);
+        assert_eq!(
+            key_value_store.get(&key),
+            Some(Bytes::from_static(b"first"))
+        );
+        assert!(key_value_store.set(key.clone(), Bytes::from_static(b"second"))?);
+        assert_eq!(
+            key_value_store.get(&key),
+            Some(Bytes::from_static(b"second"))
+        );
+        assert!(key_value_store.delete(&key)?);
+        assert_eq!(key_value_store.get(&key), None);
+        assert!(!key_value_store.delete(&key)?);
         Ok(())
     }
 
@@ -94,7 +100,7 @@ mod tests {
         let mut first = Kv::new(&file_name)?;
         first.set(kept.clone(), Bytes::from_static(b"value"))?;
         first.set(deleted.clone(), Bytes::from_static(b"old-value"))?;
-        first.del(deleted.clone())?;
+        first.delete(&deleted)?;
         drop(first);
 
         let reopened = Kv::new(&file_name)?;

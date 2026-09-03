@@ -35,23 +35,23 @@ impl Log {
                     .as_ref()
                     .parent()
                     .filter(|path| !path.as_os_str().is_empty())
-                    .unwrap_or(Path::new("."));
+                    .unwrap_or_else(|| Path::new("."));
 
                 fs::File::open(parent_directory)?.sync_all()?;
                 file
             }
-            Err(err) if err.kind() == AlreadyExists => fs::OpenOptions::new()
+            Err(error) if error.kind() == AlreadyExists => fs::OpenOptions::new()
                 .read(true)
                 .append(true)
                 .open(file_name)?,
-            Err(err) => {
-                return Err(err.into());
+            Err(error) => {
+                return Err(error.into());
             }
         };
         Ok(Self { file })
     }
 
-    pub(crate) fn write(&mut self, entry: kv_entry::Entry) -> Result<(), LogError> {
+    pub(crate) fn write(&mut self, entry: &kv_entry::Entry) -> Result<(), LogError> {
         let encoded = entry.encode()?;
         self.file.write_all(&encoded)?;
         self.file.sync_data()?;
@@ -84,12 +84,12 @@ mod tests {
         let temp_dir = tempdir()?;
         let file_name = temp_dir.path().join("wal");
         let mut log = Log::new(&file_name)?;
-        log.write(kv_entry::Entry::new(
+        log.write(&kv_entry::Entry::new(
             Bytes::from_static(b"first"),
             Bytes::from_static(b"value"),
             false,
         ))?;
-        log.write(kv_entry::Entry::new(
+        log.write(&kv_entry::Entry::new(
             Bytes::from_static(b"second"),
             Bytes::new(),
             true,

@@ -5,7 +5,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Entry {
     key: Bytes,
-    val: Bytes,
+    value: Bytes,
     deleted: bool,
 }
 
@@ -16,11 +16,11 @@ pub(crate) enum EncodeError {
     #[error("value length {length} exceeds the maximum encodable length")]
     ValueTooLarge { length: usize },
     #[error(
-        "WAL entry is too large: key is {key_len} bytes and value is {value_len} bytes; maximum is {maximum} bytes"
+        "WAL entry is too large: key is {key_length} bytes and value is {value_length} bytes; maximum is {maximum} bytes"
     )]
     EntryTooLarge {
-        key_len: usize,
-        value_len: usize,
+        key_length: usize,
+        value_length: usize,
         maximum: usize,
     },
 }
@@ -36,11 +36,11 @@ pub(crate) enum DecodeError {
     #[error("failed to read WAL entry value")]
     ReadValue(#[source] io::Error),
     #[error(
-        "WAL entry is too large: key is {key_len} bytes and value is {value_len} bytes; maximum is {maximum} bytes"
+        "WAL entry is too large: key is {key_length} bytes and value is {value_length} bytes; maximum is {maximum} bytes"
     )]
     EntryTooLarge {
-        key_len: usize,
-        value_len: usize,
+        key_length: usize,
+        value_length: usize,
         maximum: usize,
     },
 }
@@ -50,8 +50,12 @@ const CHECKSUM_SIZE: usize = 4;
 const HEADER_SIZE: usize = CHECKSUM_SIZE + 4 + 4 + 1;
 
 impl Entry {
-    pub(crate) fn new(key: Bytes, val: Bytes, deleted: bool) -> Self {
-        Self { key, val, deleted }
+    pub(crate) fn new(key: Bytes, value: Bytes, deleted: bool) -> Self {
+        Self {
+            key,
+            value,
+            deleted,
+        }
     }
 
     pub(crate) fn key(&self) -> &Bytes {
@@ -59,7 +63,7 @@ impl Entry {
     }
 
     pub(crate) fn value(&self) -> &Bytes {
-        &self.val
+        &self.value
     }
 
     pub(crate) fn is_deleted(&self) -> bool {
@@ -67,46 +71,48 @@ impl Entry {
     }
 
     pub(crate) fn into_parts(self) -> (Bytes, Bytes, bool) {
-        (self.key, self.val, self.deleted)
+        (self.key, self.value, self.deleted)
     }
 
     pub(crate) fn encode(&self) -> Result<BytesMut, EncodeError> {
-        let key_len = self.key.len();
-        let val_len = self.val.len();
+        let key_length = self.key.len();
+        let value_length = self.value.len();
 
-        if key_len > u32::MAX as usize {
-            return Err(EncodeError::KeyTooLarge { length: key_len });
+        if key_length > u32::MAX as usize {
+            return Err(EncodeError::KeyTooLarge { length: key_length });
         }
 
-        if val_len > u32::MAX as usize {
-            return Err(EncodeError::ValueTooLarge { length: val_len });
+        if value_length > u32::MAX as usize {
+            return Err(EncodeError::ValueTooLarge {
+                length: value_length,
+            });
         }
 
-        if key_len
-            .checked_add(val_len)
+        if key_length
+            .checked_add(value_length)
             .is_none_or(|length| length > MAX_ENTRY_SIZE)
         {
             return Err(EncodeError::EntryTooLarge {
-                key_len,
-                value_len: val_len,
+                key_length,
+                value_length,
                 maximum: MAX_ENTRY_SIZE,
             });
         }
 
-        let mut buf = BytesMut::with_capacity(HEADER_SIZE + key_len + val_len);
-        buf.put_u32_le(0);
-        buf.put_u32_le(key_len as u32);
-        buf.put_u32_le(val_len as u32);
+        let mut buffer = BytesMut::with_capacity(HEADER_SIZE + key_length + value_length);
+        buffer.put_u32_le(0);
+        buffer.put_u32_le(key_length as u32);
+        buffer.put_u32_le(value_length as u32);
         if self.deleted {
-            buf.put_u8(0x01);
+            buffer.put_u8(0x01);
         } else {
-            buf.put_u8(0x00);
+            buffer.put_u8(0x00);
         }
-        buf.put_slice(&self.key);
-        buf.put_slice(&self.val);
-        let checksum = crc32fast::hash(&buf[CHECKSUM_SIZE..]);
-        buf[..CHECKSUM_SIZE].copy_from_slice(&checksum.to_le_bytes());
-        Ok(buf)
+        buffer.put_slice(&self.key);
+        buffer.put_slice(&self.value);
+        let checksum = crc32fast::hash(&buffer[CHECKSUM_SIZE..]);
+        buffer[..CHECKSUM_SIZE].copy_from_slice(&checksum.to_le_bytes());
+        Ok(buffer)
     }
 }
 
@@ -125,44 +131,41 @@ pub(crate) fn decode<R: io::Read>(reader: &mut R) -> Result<Option<Entry>, Decod
         .map_err(DecodeError::ReadHeader)?;
 
     let checksum = u32::from_le_bytes(header[..4].try_into().expect("header has four bytes"));
-    let key_len =
+    let key_length =
         u32::from_le_bytes(header[4..8].try_into().expect("header has four bytes")) as usize;
-    let val_len =
+    let value_length =
         u32::from_le_bytes(header[8..12].try_into().expect("header has four bytes")) as usize;
-    let deleted = match header[12] {
-        0x00 => false,
-        _ => true,
-    };
+    let deleted = !matches!(header[12], 0x00);
 
-    if key_len
-        .checked_add(val_len)
+    if key_length
+        .checked_add(value_length)
         .is_none_or(|length| length > MAX_ENTRY_SIZE)
     {
         return Err(DecodeError::EntryTooLarge {
-            key_len,
-            value_len: val_len,
+            key_length,
+            value_length,
             maximum: MAX_ENTRY_SIZE,
         });
     }
 
-    let mut key = vec![0; key_len];
-    let mut val = vec![0; val_len];
+    let mut key = vec![0; key_length];
+    let mut value = vec![0; value_length];
     reader.read_exact(&mut key).map_err(DecodeError::ReadKey)?;
     reader
-        .read_exact(&mut val)
+        .read_exact(&mut value)
         .map_err(DecodeError::ReadValue)?;
 
     let mut hasher = crc32fast::Hasher::new();
     hasher.update(&header[4..]);
     hasher.update(&key[..]);
-    hasher.update(&val[..]);
+    hasher.update(&value);
     if hasher.finalize() != checksum {
         return Err(DecodeError::ChecksumMismatch);
     }
 
     Ok(Some(Entry {
         key: Bytes::from(key),
-        val: Bytes::from(val),
+        value: Bytes::from(value),
         deleted,
     }))
 }
@@ -230,10 +233,10 @@ mod tests {
         assert!(matches!(
             error,
             DecodeError::EntryTooLarge {
-                key_len,
-                value_len: 0,
+                key_length,
+                value_length: 0,
                 maximum: MAX_ENTRY_SIZE,
-            } if key_len == MAX_ENTRY_SIZE + 1
+            } if key_length == MAX_ENTRY_SIZE + 1
         ));
     }
 
